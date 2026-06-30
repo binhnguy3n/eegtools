@@ -6,11 +6,20 @@ import os
 st.set_page_config(page_title="EEG Analyzer", layout="wide")
 
 st.title("🧠 EEG Data Viewer & Analyzer")
-st.write("Upload your BrainVision files (`.vhdr`, `.vmrk`, `.eeg`) to visualize the signals and events.")
+st.write("Upload your BrainVision files (`.vhdr`, `.vmrk`, `.eeg`) to visualize the signals, events, and ERPs.")
 
-# Create an interactive sidebar for our controls
-st.sidebar.header("Plot Controls")
-st.sidebar.write("Adjust these sliders to pan, zoom, and scale the EEG data.")
+# --- Sidebar Controls ---
+st.sidebar.header("Raw Plot Controls")
+start_time = st.sidebar.slider("Start Time (s)", min_value=0.0, max_value=300.0, value=0.0, step=0.5, key="start")
+duration = st.sidebar.slider("Window Size (Zoom X)", min_value=0.5, max_value=30.0, value=10.0, step=0.5)
+scaling_factor = st.sidebar.slider("EEG Scaling (µV)", min_value=1.0, max_value=100.0, value=20.0, step=1.0)
+n_channels = st.sidebar.slider("Channels to Display", min_value=1, max_value=65, value=20)
+
+st.sidebar.markdown("---")
+st.sidebar.header("ERP / Epoch Controls")
+st.sidebar.write("Define the time window around each stimulus marker.")
+tmin = st.sidebar.number_input("Pre-stimulus time (s)", min_value=-2.0, max_value=0.0, value=-0.2, step=0.1)
+tmax = st.sidebar.number_input("Post-stimulus time (s)", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
 
 uploaded_files = st.file_uploader("Upload all 3 BrainVision Files", accept_multiple_files=True)
 
@@ -32,27 +41,12 @@ if len(uploaded_files) == 3:
             raw = mne.io.read_raw_brainvision(vhdr_path, preload=True)
             max_time = float(raw.times[-1])
             
-            # --- Dynamic UI Sliders ---
-            # Pan through the data
-            start_time = st.sidebar.slider("Start Time (s)", min_value=0.0, max_value=max_time, value=0.0, step=0.5)
-            
-            # Window Size acts as your X-axis zoom (narrower window = zoomed in)
-            duration = st.sidebar.slider("Window Size (Zoom X)", min_value=0.5, max_value=max_time, value=10.0, step=0.5)
-            
-            # Scaling acts as your Y-axis zoom. MNE's default EEG scale is 20 µV.
-            scaling_factor = st.sidebar.slider("EEG Scaling (µV)", min_value=1.0, max_value=100.0, value=20.0, step=1.0)
-            
-            # Control how many channels render at once to prevent vertical crowding
-            n_channels = st.sidebar.slider("Channels to Display", min_value=1, max_value=len(raw.ch_names), value=20)
-            
-            # Prevent the viewing window from exceeding the maximum time of the recording
+            # Adjust max values for raw plot sliders dynamically based on the uploaded data
             if start_time + duration > max_time:
                 start_time = max_time - duration
 
-            # --- Plotting ---
+            # --- 1. Raw EEG Plot ---
             st.subheader("Interactive Raw EEG Signal")
-            
-            # Pass the Streamlit UI values directly into MNE's plotting function
             fig_raw = raw.plot(
                 start=start_time, 
                 duration=duration, 
@@ -62,14 +56,55 @@ if len(uploaded_files) == 3:
             )
             st.pyplot(fig_raw)
             
+            # --- 2. Event Extraction ---
+            events, event_dict = mne.events_from_annotations(raw)
+            
+            st.markdown("---")
+            st.subheader("Event-Related Potentials (ERPs)")
+            
+            # Create a multiselect box populated dynamically by the markers found in the .vmrk file
+            selected_events = st.multiselect(
+                "Select Stimulus Markers to Average (eeg. S 1, S 11, S 21)", 
+                options=list(event_dict.keys()), 
+                default=list(event_dict.keys())
+            )
+            
+            if selected_events:
+                # Filter the event dictionary based on user selection
+                selected_event_dict = {k: event_dict[k] for k in selected_events}
+                
+                # Create Epochs
+                epochs = mne.Epochs(
+                    raw, 
+                    events, 
+                    event_id=selected_event_dict, 
+                    tmin=tmin, 
+                    tmax=tmax, 
+                    preload=True,
+                    baseline=(None, 0) # Baseline correction using the pre-stimulus window
+                )
+                
+                # Average the epochs to create the Evoked (ERP) object
+                evoked = epochs.average()
+                
+                # Plot the ERP
+                st.write(f"Averaged over **{len(epochs)}** selected epochs.")
+                fig_erp = evoked.plot(spatial_colors=True, show=False)
+                st.pyplot(fig_erp)
+                
+                # Plot ERP Topography at specific peak times
+                st.write("Topographical Voltage Map")
+                fig_topo = evoked.plot_topomap(times='auto', show=False)
+                st.pyplot(fig_topo)
+                
+            else:
+                st.info("Please select at least one event marker to generate the ERP.")
+            
+            # --- 3. PSD Plot ---
+            st.markdown("---")
             st.subheader("Power Spectral Density (PSD)")
             fig_psd = raw.compute_psd(fmax=50).plot(show=False)
             st.pyplot(fig_psd)
-            
-            st.subheader("Stimulus Events")
-            events, event_dict = mne.events_from_annotations(raw)
-            fig_events = mne.viz.plot_events(events, sfreq=raw.info['sfreq'], show=False)
-            st.pyplot(fig_events)
             
         else:
             st.error("Missing `.vhdr` file. Please ensure the header file was uploaded.")
